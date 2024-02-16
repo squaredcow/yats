@@ -1,21 +1,17 @@
 package config
 
 import (
-	"os"
-
-	"go.elastic.co/ecszap"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // NewLogger Creates a new instance of Uber Zap
-func NewLogger() *zap.SugaredLogger {
-	encoderConfig := ecszap.NewDefaultEncoderConfig()
-	core := ecszap.NewCore(encoderConfig, os.Stdout, zap.DebugLevel)
-	logger := zap.New(core, zap.AddCaller())
-	return logger.Sugar()
+func NewLogger(zc zapcore.Core) *zap.Logger {
+	logger := zap.New(zc, zap.AddCaller())
+	return logger
 }
 
 // CloseLogger Flushes any pending logs
-func CloseLogger(logger *zap.SugaredLogger) {
+func CloseLogger(logger *zap.Logger) {
 	_ = logger.Sync()
 }
