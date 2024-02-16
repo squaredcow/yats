@@ -16,9 +16,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// TcpServer a simple tcp server, there you go.
+// TcpServer yet another tcp server, there you go.
 type TcpServer struct {
-	log          *zap.SugaredLogger
+	log          *zap.Logger
 	cfg          config.TcpServerConfigs
 	keepAlive    sync.WaitGroup
 	shutdownHook chan struct{}
@@ -27,27 +27,29 @@ type TcpServer struct {
 	connHandler  handler.ConnHandler
 }
 
-func NewTcpServer(logger *zap.SugaredLogger, config config.TcpServerConfigs, h handler.ConnHandler) *TcpServer {
+func NewTcpServer(logger *zap.Logger, config config.TcpServerConfigs, h handler.ConnHandler) *TcpServer {
 	return &TcpServer{
 		log:          logger,
 		cfg:          config,
 		keepAlive:    sync.WaitGroup{},
 		shutdownHook: make(chan struct{}),
 		signalHook:   make(chan os.Signal, 1),
-		connPool:     make(chan chan net.Conn, config.Pool.MaxSize),
+		connPool:     make(chan chan net.Conn, config.ConnPool.MaxSize),
 		connHandler:  h,
 	}
 }
 
 func (s *TcpServer) Start(ctx context.Context) {
-	s.log.Info("tcp_server::on_start:: bootstrap routines")
+	s.log.Info("on_start: init server ...")
 
 	ln, err := net.Listen(s.cfg.Type, ":"+s.cfg.Port)
 	if err != nil {
-		s.log.Error("tcp_server::on_start:: unable to listen local network address: %v", err.Error())
+		s.log.Error("on_start: unable to init server",
+			zap.String("error", err.Error()))
 	}
 
-	s.log.Info("tcp_server::on_start:: listening on: %s", ln.Addr().String())
+	s.log.Info("on_start: listening to",
+		zap.String("address", ln.Addr().String()))
 
 	// WaitGroup: tcp_server
 	s.keepAlive.Add(1)
@@ -62,32 +64,34 @@ func (s *TcpServer) Start(ctx context.Context) {
 	signal.Notify(s.signalHook, syscall.SIGINT, syscall.SIGTERM)
 	go s.onShutdown()
 
-	s.log.Infof("tcp_server::on_start:: up and running")
+	s.log.Info("on_start: server up and running")
 	s.keepAlive.Wait()
 }
 
 func (s *TcpServer) Close() {
-	s.log.Infof("tcp_server: on_close: shutting down (gracefully)")
+	s.log.Info("on_close: shutting down server ...")
 	close(s.shutdownHook)
 	close(s.connPool)
 	close(s.signalHook)
 	s.keepAlive.Done()
+	s.log.Info("on_close: bye, bye")
 }
 
 func (s *TcpServer) startConnectionWorker(ctx context.Context) {
-	s.log.Debugf("tcp_connection_worker: start")
+	s.log.Debug("tcp_connection_worker: start")
 
 	// WaitGroup: register tcp_connection_worker
 	s.keepAlive.Add(1)
 
 	defer func() {
-		s.log.Debugf("tcp_connection_worker: close")
+		s.log.Debug("tcp_connection_worker: close")
 		if r := recover(); r != nil {
-			s.log.Errorf("tcp_connection_worker: recover from panic: %v", r)
+			s.log.Error("tcp_connection_worker: recover from panic",
+				zap.Any("any", r))
 			s.keepAlive.Done()
 			return
 		}
-		s.log.Debugf("tcp_connection_worker: done")
+		s.log.Debug("tcp_connection_worker: done")
 		s.keepAlive.Done()
 	}()
 
@@ -95,40 +99,44 @@ func (s *TcpServer) startConnectionWorker(ctx context.Context) {
 		select {
 		case <-s.shutdownHook:
 			// On shutdown signal, force exit
-			s.log.Debugf("tcp_connection_worker: shutdown signal received")
+			s.log.Debug("tcp_connection_worker: shutdown")
 			return
 		default:
 			// goroutine: on connection
-			s.log.Debugf("tcp_connection_worker: handle available connection")
-			go s.onConnection(ctx, <-connChan)
+			conn := <-connChan
+			s.log.Debug("tcp_connection_worker: handle connection",
+				zap.Any("localAddress", conn.LocalAddr()), zap.Any("remoteAddress", conn.RemoteAddr()))
+			go s.onConnection(ctx, conn)
 		}
 	}
 }
 
 func (s *TcpServer) onConnection(ctx context.Context, conn net.Conn) {
-	s.log.Debugf("tcp_connection: start")
+	s.log.Debug("tcp_connection: start")
 
 	// WaitGroup: tcp_connection
 	s.keepAlive.Add(1)
 
 	// Settings
-	noop := time.Duration(s.cfg.Pool.NoOpCycle) * time.Millisecond
+	noop := time.Duration(s.cfg.ConnPool.NoOpCycle) * time.Millisecond
 
 	defer func() {
 		if r := recover(); r != nil {
-			s.log.Errorf("tcp_connection: recover from panic: %v", r)
+			s.log.Error("tcp_connection: recover from panic",
+				zap.Any("any", r))
 			s.keepAlive.Done()
 			return
 		}
-		s.log.Debugf("tcp_connection: done")
+		s.log.Debug("tcp_connection: done")
 		s.keepAlive.Done()
 	}()
 
 	defer func(conn net.Conn) {
-		s.log.Debugf("tcp_connection: close")
+		s.log.Debug("tcp_connection: close")
 		err := conn.Close()
 		if err != nil {
-			s.log.Errorf("tcp_connection: unable to close connection: %v", err.Error())
+			s.log.Error("tcp_connection: unable to close connection",
+				zap.String("error", err.Error()))
 		}
 	}(conn)
 
@@ -136,12 +144,15 @@ func (s *TcpServer) onConnection(ctx context.Context, conn net.Conn) {
 		select {
 		case <-s.shutdownHook:
 			// On shutdown signal, force exit
-			s.log.Debugf("tcp_connection: shutdown signal received")
+			s.log.Debug("tcp_connection: shutdown")
 			return
 		default:
 			traceID := uuid.NewString()
-			s.log.With("traceId", traceID).Debugf("tcp_connection: delegate to connection handler")
-			connCtx := context.WithValue(ctx, "traceId", traceID)
+
+			s.log.With(zap.String("traceId", traceID)).
+				Debug("tcp_connection: delegate connection to handler")
+
+			connCtx := context.WithValue(ctx, ctxTraceID, traceID)
 
 			s.connHandler.Handle(connCtx, conn)
 
@@ -152,22 +163,23 @@ func (s *TcpServer) onConnection(ctx context.Context, conn net.Conn) {
 }
 
 func (s *TcpServer) startNetworkListener(ln net.Listener) {
-	s.log.Debugf("tcp_network_listener: start")
+	s.log.Debug("tcp_network_listener: start")
 
 	// WaitGroup: tcp_network_listener
 	s.keepAlive.Add(1)
 
 	// Settings
-	ttl := time.Duration(s.cfg.Pool.WaitForConnTimeout) * time.Millisecond
+	ttl := time.Duration(s.cfg.ConnPool.WaitForConnTimeout) * time.Millisecond
 
 	defer func() {
-		s.log.Debugf("tcp_network_listener: close")
+		s.log.Debug("tcp_network_listener: close")
 		if r := recover(); r != nil {
-			s.log.Errorf("tcp_network_listener: recover from panic: %v", r)
+			s.log.Error("tcp_network_listener: recover from panic",
+				zap.Any("any", r))
 			s.keepAlive.Done()
 			return
 		}
-		s.log.Debugf("tcp_network_listener: done")
+		s.log.Debug("tcp_network_listener: done")
 		s.keepAlive.Done()
 	}()
 
@@ -175,17 +187,18 @@ func (s *TcpServer) startNetworkListener(ln net.Listener) {
 		select {
 		case <-s.shutdownHook:
 			// On shutdown signal, force exit
-			s.log.Debugf("tcp_network_listener: shutdown signal received")
+			s.log.Debug("tcp_network_listener: shutdown")
 			return
 		default:
-			s.log.Debugf("tcp_network_listener: listening for incoming connection")
+			s.log.Debug("tcp_network_listener: listening for incoming connection")
 
 			// Set timeout for waiting on the next connection to prevent infinite blocking
 			tcp, _ := ln.(*net.TCPListener)
 			timeout := time.Now().Add(ttl)
 			err := tcp.SetDeadline(timeout)
 			if err != nil {
-				s.log.Errorf("tcp_network_listener: unable to set timeout: %v", err.Error())
+				s.log.Error("tcp_network_listener: unable to set timeout",
+					zap.String("error", err.Error()))
 				return
 			}
 
@@ -195,11 +208,13 @@ func (s *TcpServer) startNetworkListener(ln net.Listener) {
 				var netOpErr *net.OpError
 				ok := errors.As(err, &netOpErr)
 				if ok && netOpErr.Timeout() {
-					s.log.Debugf("tcp_network_listener: timeout waiting: %v", err.Error())
+					s.log.Debug("tcp_network_listener: timeout waiting for connection",
+						zap.String("error", err.Error()))
 					continue
 				}
 
-				s.log.Errorf("tcp_network_listener: incoming connection rejected: %v", err.Error())
+				s.log.Error("tcp_network_listener: incoming connection rejected",
+					zap.String("error", err.Error()))
 				continue
 			}
 
@@ -209,28 +224,29 @@ func (s *TcpServer) startNetworkListener(ln net.Listener) {
 			s.connPool <- jobChannel
 			jobChannel <- conn
 
-			s.log.Debugf("tcp_network_listener: accepted incoming connection")
+			s.log.Debug("tcp_network_listener: accepted incoming connection")
 		}
 	}
 }
 
 func (s *TcpServer) onShutdown() {
-	s.log.Debugf("on_shutdown: listen for shutdown signals")
+	s.log.Debug("on_shutdown: listen for shutdown signals")
 
 	// WaitGroup: on_shutdown
 	s.keepAlive.Add(1)
 
 	// Settings
-	noop := time.Duration(s.cfg.Pool.NoOpCycle) * time.Millisecond
+	noop := time.Duration(s.cfg.ConnPool.NoOpCycle) * time.Millisecond
 
 	defer func() {
-		s.log.Debugf("on_shutdown: received shutdown signal")
+		s.log.Debug("on_shutdown: received shutdown signal")
 		if r := recover(); r != nil {
-			s.log.Errorf("on_shutdown: recover from panic: %v", r)
+			s.log.Error("on_shutdown: recover from panic:",
+				zap.Any("any", r))
 			s.keepAlive.Done()
 			return
 		}
-		s.log.Debugf("on_shutdown: done")
+		s.log.Debug("on_shutdown: done")
 		s.keepAlive.Done()
 	}()
 

@@ -5,18 +5,24 @@ import (
 
 	"github.com/squaredcow/yats/pkg/config"
 	"github.com/squaredcow/yats/pkg/tcpserver"
+	"go.uber.org/zap"
 )
 
 func main() {
 
-	logger := config.NewLogger()
+	logger, _ := zap.NewDevelopment()
+
+	// encoderConfig := ecszap.NewDefaultEncoderConfig()
+	// core := ecszap.NewCore(encoderConfig, os.Stdout, zap.InfoLevel)
+	// logger := config.NewLogger(core)
+
 	defer config.CloseLogger(logger)
 
 	cfg := config.TcpServerConfigs{
 		Type: "tcp",
 		Host: "localhost",
 		Port: "3000",
-		Pool: config.TCPServerPoolConfigs{
+		ConnPool: config.TcpConnPoolConfigs{
 			MaxSize:            3,
 			WaitForConnTimeout: 5000,
 			NoOpCycle:          3000,
